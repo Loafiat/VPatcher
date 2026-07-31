@@ -11,6 +11,7 @@ if (!("VPatcherData" in getroottable()))
 }
 
 ::VPatcher <- {
+    // don't ask why but I need to patch all of them despite them all being based on CBaseEntity.
     classes = [
         CBaseEntity,
         CBaseAnimating, 
@@ -29,71 +30,148 @@ if (!("VPatcherData" in getroottable()))
         CBaseCombatWeapon
     ],
 
+    PatchClassMethod = function(cls, mthdnm, func) {
+        if (mthdnm == "GetClassname")
+            throw "Cannot patch GetClassname since it is used for patching.";
+
+        if (!(mthdnm in cls))
+            cls[mthdnm](); // attempt to execute it to throw the not found error
+
+        if (!(cls in VPatcherData.OrigMethods))
+            VPatcherData.OrigMethods[cls] <- {};
+
+        if (!(mthdnm in VPatcherData.OrigMethods[cls]))
+            VPatcherData.OrigMethods[cls][mthdnm] <- cls[mthdnm];
+
+        if (!(cls in VPatcherData.Patches))
+            VPatcherData.Patches[cls] <- {};
+
+        if (!(mthdnm in VPatcherData.Patches[cls]))
+        {
+            VPatcherData.Patches[cls][mthdnm] <- [];
+            
+            AssignPatch(cls, mthdnm);
+        }
+
+        VPatcherData.Patches[cls][mthdnm].append({
+            classname = "*",
+            func = func
+        });
+    },
+
+    // Genuinely did not have the brain capacity to understand what I'm writing anymore and
+    // didn't want a 3rd almost total rewrite so I'm slopping it up with ChatGPT, sorry lol.
+
+    // Though to be fair it didn't write everything. I'm using it as a tool you can't be mad at me 😇
+
     PatchEntityMethod = function(clsnm, mthdnm, func) {
         if (mthdnm == "GetClassname")
             throw "Cannot patch GetClassname since it is used for patching.";
 
         foreach (cls in classes)
         {
-            if (mthdnm in cls)
+            if (!(mthdnm in cls))
+                continue;
+
+            if (!(cls in VPatcherData.OrigMethods))
+                VPatcherData.OrigMethods[cls] <- {};
+
+            if (!(mthdnm in VPatcherData.OrigMethods[cls]))
+                VPatcherData.OrigMethods[cls][mthdnm] <- cls[mthdnm];
+
+            if (!(cls in VPatcherData.Patches))
+                VPatcherData.Patches[cls] <- {};
+
+            if (!(mthdnm in VPatcherData.Patches[cls]))
             {
-                if (!(cls in VPatcherData.OrigMethods))
-                    VPatcherData.OrigMethods[cls] <- {};
-                if (!(mthdnm in VPatcherData.OrigMethods[cls]))
-                    VPatcherData.OrigMethods[cls][mthdnm] <- cls[mthdnm];
+                VPatcherData.Patches[cls][mthdnm] <- [];
 
-                if (!(cls in VPatcherData.Patches))
-                    VPatcherData.Patches[cls] <- {};
-                if (!(clsnm in VPatcherData.Patches[cls]))
-                    VPatcherData.Patches[cls][clsnm] <- {};
-                if (!(mthdnm in VPatcherData.Patches[cls][clsnm]))
-                    VPatcherData.Patches[cls][clsnm][mthdnm] <- cls[mthdnm];
-                
-                local origMthd;
-                if (cls in VPatcherData.Patches && clsnm in VPatcherData.Patches[cls] && mthdnm in VPatcherData.Patches[cls][clsnm] && VPatcherData.Patches[cls][clsnm][mthdnm] != null)
-                    origMthd = VPatcherData.Patches[cls][clsnm][mthdnm]
-                else
-                    origMthd = VPatcherData.OrigMethods[cls][mthdnm];
-
-                cls[mthdnm] <- function(...)
-                {
-                    if (GetClassname() in VPatcherData.Patches[cls] && mthdnm in VPatcherData.Patches[cls][GetClassname()])
-                    {
-                        vargv.insert(0, origMthd);
-                        vargv.insert(0, this);
-                        return func.bindenv(this).acall(vargv);
-                    }
-                    // yes, this does mean that if it finds a specified patch for the method this'll be overridden. This is the best implimentation I could do, this whole project has been a headache.
-                    else if ("*" in VPatcherData.Patches[cls] && mthdnm in VPatcherData.Patches[cls]["*"])
-                    {
-                        vargv.insert(0, origMthd);
-                        vargv.insert(0, this);
-                        return func.bindenv(this).acall(vargv);
-                    }
-                    else
-                    {
-                        return VPatcherData.OrigMethods[cls][mthdnm].bindenv(this).acall(vargv);
-                    }
-                };
-                VPatcherData.Patches[cls][clsnm][mthdnm] = cls[mthdnm];
+                AssignPatch(cls, mthdnm);
             }
+
+            VPatcherData.Patches[cls][mthdnm].append({
+                classname = clsnm,
+                func = func
+            });
         }
+    },
+
+    AssignPatch = function(cls, mthdnm) {
+        cls[mthdnm] <- function(...)
+        {
+            local callArgs = clone vargv;
+            callArgs.insert(0, this);
+
+            local patches = VPatcherData.Patches[cls][mthdnm];
+            local self = this;
+            local clsname = self.GetClassname();
+
+            local Invoke = null;
+
+            Invoke = function(index, args)
+            {
+                while (index >= 0)
+                {
+                    local patch = patches[index];
+
+                    if (patch.classname == "*" || patch.classname == clsname)
+                    {
+                        local origMethod = function(...)
+                        {
+                            local newArgs = clone vargv;
+                            newArgs.insert(0, self);
+                            return Invoke(index - 1, newArgs);
+                        };
+
+                        // mistuh white put dat shit on index 1 so it doesn't overwrite the scope yo
+                        local argv = clone args;
+                        argv.insert(1, origMethod);
+
+                        return patch.func.acall(argv);
+                    }
+                    
+                    index--;
+                }
+
+                return VPatcherData.OrigMethods[cls][mthdnm].acall(args);
+            };
+            
+            return Invoke(patches.len() - 1, callArgs);
+        };
     },
 
     UnPatchEntityMethod = function(clsnm, mthdnm) {
         if (mthdnm == "GetClassname")
             throw "Cannot unpatch GetClassname since it cannot be patched.";
-        
+
         foreach (cls in classes)
         {
-            if (cls in VPatcherData.OrigMethods && mthdnm in VPatcherData.OrigMethods[cls])
-            {
-                cls[mthdnm] <- VPatcherData.OrigMethods[cls][mthdnm];
-            }
+            if (!(cls in VPatcherData.Patches))
+                continue;
 
-            if (cls in VPatcherData.Patches && clsnm in VPatcherData.Patches[cls])
+            if (!(mthdnm in VPatcherData.Patches[cls]))
+                continue;
+
+            local patches = VPatcherData.Patches[cls][mthdnm];
+
+            for (local i = patches.len() - 1; i >= 0; --i)
             {
-                VPatcherData.Patches[cls][clsnm].rawdelete(mthdnm);
+                if (patches[i].classname == clsnm)
+                    patches.remove(i);
+            }
+    
+            if (patches.len() == 0)
+            {
+                if (cls in VPatcherData.OrigMethods &&
+                    mthdnm in VPatcherData.OrigMethods[cls])
+                {
+                    cls[mthdnm] <- VPatcherData.OrigMethods[cls][mthdnm];
+                }
+
+                VPatcherData.Patches[cls].rawdelete(mthdnm);
+
+                if (VPatcherData.Patches[cls].len() == 0)
+                    VPatcherData.Patches.rawdelete(cls);
             }
         }
     },
@@ -122,7 +200,6 @@ if (!("VPatcherData" in getroottable()))
     }
 }
 
-// add VPatcher docs
 RegisterFunctionDocumentation(VPatcher.PatchEntityMethod, "VPatcher::PatchEntityMethod", "VPatcher::PatchEntityMethod(string entityClass, string methodName, function<func origMethod, ...> patch)", "Monkey patch a method for the specified entity.");
 RegisterFunctionDocumentation(VPatcher.UnPatchEntityMethod, "VPatcher::UnPatchEntityMethod", "VPatcher::PatchEntityMethod(string entityClass, string methodName)", "Removes all patches from the method on the specified entity and restores original funcitonality.");
 RegisterFunctionDocumentation(VPatcher.AddEntityMethod, "VPatcher::AddEntityMethod", "VPatcher::AddEntityMethod(string entityClass, string methodName, function func)", "Adds a method to the specified entity class.");
